@@ -38,7 +38,7 @@ from openai import OpenAI
 
 # --- OpenAI credentials & model ---
 OPENAI_API_KEY  = "sk-..."                      # your OpenAI API key
-OPENAI_MODEL    = "gpt-5.5"                      # model to use
+OPENAI_MODEL    = "gpt-4o"                      # model to use
 
 # --- Input files ---
 LOG_FILE_PATH   = "00000006.BIN"               # ArduPilot .BIN log
@@ -46,7 +46,8 @@ PARAM_FILE_PATH = "ad5_20260423.param"         # current .param file  (or None)
 KB_FILE_PATH    = "ardupilot_kb.json"          # parameter knowledge base (or None)
 
 # --- Output ---
-CSV_OUTPUT_PATH = "flight_telemetry.csv"       # extracted telemetry CSV
+CSV_OUTPUT_PATH    = "flight_telemetry.csv"    # extracted telemetry CSV
+REPORT_OUTPUT_PATH = "suggestion_report.md"    # LLM analysis markdown report
 
 # --- Optional time window (seconds from log start; set None for full log) ---
 START_TIME_SECONDS: Optional[float] = None     # e.g. 200
@@ -62,7 +63,6 @@ DRONE_DESCRIPTION = ""          # e.g. "Fixed-wing, 1800mm wingspan, ~2.1 kg AUW
 # =============================================================================
 # TELEMETRY EXTRACTION
 # =============================================================================
-
 
 def _msg_to_record(msg, fields: List[str]) -> Dict[str, float]:
     return {f: getattr(msg, f) for f in fields if hasattr(msg, f)}
@@ -232,8 +232,27 @@ def load_param_file(path: Path) -> Dict[str, str]:
 
 
 def load_knowledge_base(path: Path) -> List[dict]:
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load JSON knowledge base, trying multiple encodings and skipping BOM."""
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            raw = path.read_text(encoding=encoding).strip()
+            if not raw:
+                print(f"WARNING: KB file is empty: {path} — skipping.")
+                return []
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                # Some KB exports wrap the list under a key
+                for v in data.values():
+                    if isinstance(v, list):
+                        return v
+            print(f"WARNING: KB file has unexpected structure — skipping.")
+            return []
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+    print(f"WARNING: Could not parse KB file {path} — skipping.")
+    return []
 
 
 # =============================================================================
@@ -359,7 +378,14 @@ def build_prompt(
 
 def call_llm(prompt: str) -> str:
     print("[3/4] Sending data to LLM …")
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    # Workaround for httpx >=0.28 dropping the 'proxies' argument that older
+    # openai SDK versions pass internally. Supplying an explicit http_client
+    # bypasses the conflict entirely.
+    try:
+        import httpx
+        client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client())
+    except TypeError:
+        client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
@@ -373,7 +399,7 @@ def call_llm(prompt: str) -> str:
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
+        # temperature omitted: reasoning models (o1/o3/o4) reject it; gpt-4o default is fine
     )
     return response.choices[0].message.content or ""
 
@@ -382,7 +408,58 @@ def call_llm(prompt: str) -> str:
 # RESPONSE PARSING & DISPLAY
 # =============================================================================
 
-def parse_and_display(response: str) -> None:
+
+def _save_markdown_report(
+    report_path: Path,
+    narrative: str,
+    changes: list,
+    log_name: str,
+    drone_model: str,
+) -> None:
+    """Write the full analysis as a Markdown file."""
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines: list[str] = []
+    lines.append(f"# ArduPilot Flight Analysis Report")
+    lines.append(f"")
+    lines.append(f"| Field | Value |")
+    lines.append(f"|-------|-------|")
+    lines.append(f"| Log file | `{log_name}` |")
+    if drone_model:
+        lines.append(f"| Drone model | {drone_model} |")
+    lines.append(f"| Generated | {now} |")
+    lines.append(f"")
+
+    if narrative:
+        lines.append("## Flight Analysis")
+        lines.append("")
+        lines.append(narrative)
+        lines.append("")
+
+    if changes:
+        lines.append("## Suggested Parameter Changes")
+        lines.append("")
+        lines.append("| Parameter | Current Value | Suggested Value | Reason |")
+        lines.append("|-----------|---------------|-----------------|--------|")
+        for name, current, suggested, reason in changes:
+            # Escape pipe characters inside cells
+            reason_safe = reason.replace("|", "&#124;")
+            lines.append(f"| `{name}` | {current} | **{suggested}** | {reason_safe} |")
+        lines.append("")
+        lines.append(f"*Total suggested changes: {len(changes)}*")
+        lines.append("")
+    else:
+        lines.append("## Suggested Parameter Changes")
+        lines.append("")
+        lines.append("_No structured parameter changes were identified._")
+        lines.append("")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Markdown report saved to: {report_path}")
+
+
+def parse_and_display(response: str, report_path: Path) -> None:
     print("\n" + "=" * 80)
     print("  ARDUPILOT FLIGHT ANALYSIS REPORT")
     print("=" * 80)
@@ -456,7 +533,17 @@ def parse_and_display(response: str) -> None:
             writer.writerow(["Parameter", "Current Value", "Suggested Value", "Reason"])
             writer.writerows(changes)
         print(f"Parameter suggestions also saved to: {changes_csv}")
-    else:
+
+    # ── Save markdown report ──────────────────────────────────────────────────
+    _save_markdown_report(
+        report_path=report_path,
+        narrative="\n".join(narrative_lines).strip(),
+        changes=changes,
+        log_name=Path(LOG_FILE_PATH).name,
+        drone_model=DRONE_MODEL,
+    )
+
+    if not changes:
         print("\n[No structured PARAM_CHANGE lines found in LLM response — see narrative above.]")
 
 
@@ -537,7 +624,7 @@ def main() -> None:
     # --- Step 4: Call LLM and display results ---
     raw_response = call_llm(prompt)
     print("[4/4] Response received. Parsing …\n")
-    parse_and_display(raw_response)
+    parse_and_display(raw_response, report_path=Path(REPORT_OUTPUT_PATH))
 
 
 if __name__ == "__main__":
