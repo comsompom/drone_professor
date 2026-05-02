@@ -36,7 +36,7 @@ from pymavlink import mavutil
 # =============================================================================
 
 OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-4o"
+OPENAI_MODEL = "gpt-5.4-mini"  # gpt-5.5,  gpt-5.4,  gpt-5.4-mini
 
 LOG_FILE_PATH = "00000006.BIN"
 PARAM_FILE_PATH = "ad5_20260423.param"  # set to None to skip
