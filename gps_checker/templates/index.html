@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GPS Checker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <h1>GPS Checker</h1>
+            <p id="receiverLine">Scanning for receiver</p>
+        </div>
+        <div class="top-actions">
+            <span id="statusPill" class="pill muted">Scanning</span>
+            <button id="rescanBtn" type="button">Rescan</button>
+        </div>
+    </header>
+
+    <main class="layout">
+        <section class="summary-grid" aria-label="Receiver summary">
+            <div class="metric">
+                <span>Fix</span>
+                <strong id="fixType">--</strong>
+            </div>
+            <div class="metric">
+                <span>RTK</span>
+                <strong id="rtkStatus">--</strong>
+            </div>
+            <div class="metric">
+                <span>Satellites Used</span>
+                <strong id="satUsed">--</strong>
+            </div>
+            <div class="metric">
+                <span>Accuracy H/V</span>
+                <strong id="accuracy">--</strong>
+            </div>
+            <div class="metric">
+                <span>Position</span>
+                <strong id="position">--</strong>
+            </div>
+            <div class="metric">
+                <span>Altitude</span>
+                <strong id="altitude">--</strong>
+            </div>
+        </section>
+
+        <section class="panel main-panel">
+            <div class="panel-heading">
+                <h2>Satellite Sky View</h2>
+                <span id="satInView">0 in view</span>
+            </div>
+            <canvas id="skyCanvas" width="640" height="480" aria-label="Satellite sky view"></canvas>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>Signals</h2>
+                <span id="signalSummary">No satellites</span>
+            </div>
+            <div id="signalBars" class="signal-bars"></div>
+        </section>
+
+        <section class="panel table-panel">
+            <div class="panel-heading">
+                <h2>Satellite Details</h2>
+                <span id="messageRate">--</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>GNSS</th>
+                            <th>ID</th>
+                            <th>Used</th>
+                            <th>C/N0</th>
+                            <th>Elev</th>
+                            <th>Azim</th>
+                            <th>Signal</th>
+                        </tr>
+                    </thead>
+                    <tbody id="satTable"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel side-panel">
+            <div class="panel-heading">
+                <h2>Receiver</h2>
+            </div>
+            <dl class="details">
+                <dt>Port</dt><dd id="port">--</dd>
+                <dt>Protocol</dt><dd id="protocol">--</dd>
+                <dt>Software</dt><dd id="software">--</dd>
+                <dt>Hardware</dt><dd id="hardware">--</dd>
+                <dt>RTCM</dt><dd id="rtcm">--</dd>
+                <dt>Bytes</dt><dd id="bytes">0</dd>
+            </dl>
+            <div id="errors" class="errors"></div>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
