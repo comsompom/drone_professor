@@ -32,6 +32,15 @@ drone_professor/
 │   ├── templates/             # Dashboard HTML
 │   └── static/                # Dashboard CSS and JavaScript
 │
+├── flight_log_checker/        # Flask ArduPilot log checker/dashboard
+│   ├── app.py                 # Flask server and API routes
+│   ├── flight_tools.py        # Wrapper around flight analysis scripts
+│   ├── requirements.txt       # Flight log checker dependencies
+│   ├── generated/             # Generated 2D/3D HTML output files
+│   ├── uploads/               # Uploaded .BIN logs
+│   ├── templates/             # Dashboard HTML
+│   └── static/                # Dashboard CSS and JavaScript
+│
 └── README.md                  # This file
 ```
 
@@ -203,6 +212,62 @@ For the richest dashboard data, configure the receiver to output UBX `NAV-PVT` a
 
 ---
 
+## 🛰 Flight Log Checker: 2D/3D ArduPilot Log Dashboard
+
+The repository also includes a separate Flask application in `flight_log_checker/` for inspecting ArduPilot DataFlash `.BIN` flight logs from a browser.
+
+The Flight Log Checker can:
+* Select an existing log from `logs/*.BIN`.
+* Upload a new `.BIN` log through the browser.
+* Accept a custom log path.
+* Automatically detect the flight start/end window before creating charts.
+* Generate a 3D replay using `scripts/flight_3d_replay.py`.
+* Generate a configurable 2D chart using telemetry extracted through `scripts/flight_2d_chart.py`.
+* Show generated 2D and 3D HTML outputs inside separate dashboard tabs.
+
+The main dashboard has:
+* **Main** tab for selecting the log, detecting the flight window, and creating 2D/3D outputs.
+* **2D Parameters** tab for selecting which telemetry parameters appear in the 2D chart.
+* **2D Log** tab for viewing the generated 2D HTML chart.
+* **3D Log** tab for viewing the generated 3D HTML replay.
+
+In the detected flight window panel, `Launch` and `Landing` are displayed on the same row, with `Duration` shown below them.
+
+### Run the Flight Log Checker
+
+**1. Install the Flight Log Checker dependencies:**
+```bash
+pip install -r flight_log_checker/requirements.txt
+```
+
+**2. Start the Flask app:**
+```bash
+python flight_log_checker/app.py
+```
+
+**3. Open the dashboard:**
+```text
+http://127.0.0.1:5080
+```
+
+The app uses port `5080` by default because browser vendors block some local ports, including `5060`, as unsafe.
+
+If port `5080` is already in use, run it on another browser-safe port:
+```bash
+FLIGHT_LOG_CHECKER_PORT=5081 python flight_log_checker/app.py
+```
+
+Then open:
+```text
+http://127.0.0.1:5081
+```
+
+### Flight Log Output Notes
+
+Generated charts are written to `flight_log_checker/generated/`, and uploaded logs are written to `flight_log_checker/uploads/`. Both folders contain local `.gitignore` files so generated HTML files and uploaded logs are not committed by default.
+
+---
+
 ## 🛠 Maintenance & Updates
 
 When a new version of ArduPilot is released (e.g., v4.7):
@@ -218,3 +283,9 @@ For GPS Checker changes:
 1. Keep its code isolated inside `gps_checker/`.
 2. Add new GPS-specific dependencies to `gps_checker/requirements.txt`.
 3. Do not commit generated `__pycache__/` files.
+
+For Flight Log Checker changes:
+1. Keep its code isolated inside `flight_log_checker/`.
+2. Reuse the existing analysis scripts in `scripts/` when possible.
+3. Add new flight-log-specific dependencies to `flight_log_checker/requirements.txt`.
+4. Do not commit generated HTML files, uploaded `.BIN` logs, or `__pycache__/` files.
