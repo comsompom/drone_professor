@@ -11,34 +11,58 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_left
 from pathlib import Path
-from typing import Dict, List
+from typing import Any
 
-import numpy as np
-import pandas as pd
 from pymavlink import mavutil
 
 # =============================================================================
 # USER CONSTANTS
 # =============================================================================
-LOG_FILE_PATH = "00000007.BIN"
+LOG_FILE_PATH = "00000001.BIN"
 OUTPUT_HTML_PATH = "flight_2d_chart.html"
-DOWNSAMPLE_STEP = 4          # reduce for more resolution, increase for speed
+DOWNSAMPLE_STEP = 3          # reduce for more resolution, increase for speed
 
 # Optional time window in seconds from log start.
-START_TIME_SECONDS = 1265    # set to None for full file
-END_TIME_SECONDS   = 1485    # set to None for full file
+START_TIME_SECONDS = 448    # set to None for full file
+END_TIME_SECONDS = 1530    # set to None for full file
 
 
 # =============================================================================
 # DATA EXTRACTION  (identical pipeline to the 3-D script)
 # =============================================================================
 
-def _msg_to_record(msg, fields: List[str]) -> Dict[str, float]:
+Record = dict[str, Any]
+
+
+def _msg_to_record(msg, fields: list[str]) -> Record:
     return {f: getattr(msg, f) for f in fields if hasattr(msg, f)}
 
 
-def extract_flight_data(log_path: Path) -> pd.DataFrame:
+def _nearest_record(records: list[Record], t: float, tolerance_s: float) -> Record | None:
+    if not records:
+        return None
+
+    times = [float(record["t"]) for record in records]
+    index = bisect_left(times, t)
+    best: tuple[float, Record] | None = None
+
+    for candidate_index in (index - 1, index):
+        if 0 <= candidate_index < len(records):
+            record = records[candidate_index]
+            delta = abs(float(record["t"]) - t)
+            if delta <= tolerance_s and (best is None or delta < best[0]):
+                best = (delta, record)
+
+    return best[1] if best else None
+
+
+def _has_value(record: Record | None, field: str) -> bool:
+    return record is not None and field in record and record[field] is not None
+
+
+def extract_flight_data(log_path: Path) -> list[Record]:
     mavlog = mavutil.mavlink_connection(str(log_path))
     pos_records, att_records, gps_records, xkf1_records, rcin_records = [], [], [], [], []
 
@@ -76,82 +100,102 @@ def extract_flight_data(log_path: Path) -> pd.DataFrame:
     if not pos_records or not att_records:
         raise RuntimeError("Required POS/ATT data not found in log.")
 
-    pos_df   = pd.DataFrame(pos_records).sort_values("t")
-    att_df   = pd.DataFrame(att_records).sort_values("t")
-    gps_df   = pd.DataFrame(gps_records).sort_values("t")   if gps_records   else pd.DataFrame(columns=["t"])
-    xkf1_df  = pd.DataFrame(xkf1_records).sort_values("t") if xkf1_records  else pd.DataFrame(columns=["t"])
-    rcin_df  = pd.DataFrame(rcin_records).sort_values("t")  if rcin_records  else pd.DataFrame(columns=["t"])
+    pos_records.sort(key=lambda record: record["t"])
+    att_records.sort(key=lambda record: record["t"])
+    gps_records.sort(key=lambda record: record["t"])
+    xkf1_records.sort(key=lambda record: record["t"])
+    rcin_records.sort(key=lambda record: record["t"])
 
-    base = pos_df[["t", "Lat", "Lng", "Alt", "RelHomeAlt"]].copy()
-    merged = pd.merge_asof(base.sort_values("t"), att_df, on="t", direction="nearest", tolerance=0.2)
-    if not gps_df.empty:
-        merged = pd.merge_asof(merged.sort_values("t"), gps_df[["t", "Spd"]], on="t", direction="nearest", tolerance=0.5)
-    if not xkf1_df.empty:
-        merged = pd.merge_asof(merged.sort_values("t"), xkf1_df[["t", "VN", "VE", "VD"]], on="t", direction="nearest", tolerance=0.5)
-    if not rcin_df.empty and "C3" in rcin_df.columns:
-        merged = pd.merge_asof(merged.sort_values("t"), rcin_df[["t", "C3"]], on="t", direction="nearest", tolerance=0.5)
+    merged: list[Record] = []
+    for pos in pos_records:
+        t = float(pos["t"])
+        att = _nearest_record(att_records, t, 0.2)
+        if att is None:
+            continue
 
-    merged = merged.dropna(subset=["Roll", "Pitch", "Yaw"]).reset_index(drop=True)
+        gps = _nearest_record(gps_records, t, 0.5)
+        xkf1 = _nearest_record(xkf1_records, t, 0.5)
+        rcin = _nearest_record(rcin_records, t, 0.5)
 
-    # Normalise RCIN C3 PWM (1000–2000 µs) → 0–100 %
-    # Auto-detect actual min/max from the data to handle non-standard trims.
-    if "C3" in merged.columns and merged["C3"].notna().any():
-        c3 = merged["C3"]
-        pwm_min = c3.min()
-        pwm_max = c3.max()
-        if pwm_max > pwm_min:
-            merged["throttle_pct"] = ((c3 - pwm_min) / (pwm_max - pwm_min) * 100.0).clip(0, 100)
+        vn = float(xkf1["VN"]) if _has_value(xkf1, "VN") else None
+        ve = float(xkf1["VE"]) if _has_value(xkf1, "VE") else None
+        vd = float(xkf1["VD"]) if _has_value(xkf1, "VD") else None
+        ekf_speed_mps = math.hypot(vn, ve) if vn is not None and ve is not None else None
+        speed_mps = float(gps["Spd"]) if _has_value(gps, "Spd") else (ekf_speed_mps or 0.0)
+
+        merged.append(
+            {
+                "t": t,
+                "Lat": float(pos["Lat"]),
+                "Lng": float(pos["Lng"]),
+                "Alt": float(pos["Alt"]),
+                "RelHomeAlt": float(pos.get("RelHomeAlt", 0.0)),
+                "Roll": float(att["Roll"]),
+                "Pitch": float(att["Pitch"]),
+                "Yaw": float(att["Yaw"]),
+                "VN": vn,
+                "VE": ve,
+                "VD": vd,
+                "C3": float(rcin["C3"]) if _has_value(rcin, "C3") else None,
+                "speed_mps": speed_mps,
+                "vspeed_mps": -vd if vd is not None else None,
+                "horiz_speed_mps": ekf_speed_mps if ekf_speed_mps is not None else speed_mps,
+            }
+        )
+
+    # Normalise RCIN C3 PWM (1000-2000 us) to 0-100%.
+    c3_values = [float(record["C3"]) for record in merged if record["C3"] is not None]
+    pwm_min = min(c3_values) if c3_values else None
+    pwm_max = max(c3_values) if c3_values else None
+    for record in merged:
+        if record["C3"] is not None and pwm_min is not None and pwm_max is not None and pwm_max > pwm_min:
+            record["throttle_pct"] = max(0.0, min(100.0, (float(record["C3"]) - pwm_min) / (pwm_max - pwm_min) * 100.0))
+        elif record["C3"] is not None:
+            record["throttle_pct"] = 0.0
         else:
-            merged["throttle_pct"] = 0.0
-    else:
-        merged["throttle_pct"] = np.nan
+            record["throttle_pct"] = None
 
-    if "Spd" not in merged.columns:
-        merged["Spd"] = np.nan
-    if {"VN", "VE"}.issubset(merged.columns):
-        ekf_spd = np.sqrt(np.square(merged["VN"]) + np.square(merged["VE"]))
-        merged["speed_mps"] = merged["Spd"].fillna(ekf_spd)
-    else:
-        merged["speed_mps"] = merged["Spd"]
-    merged["speed_mps"] = merged["speed_mps"].fillna(0.0)
+    previous: Record | None = None
+    for record in merged:
+        if record["vspeed_mps"] is None:
+            if previous is not None:
+                dt = float(record["t"]) - float(previous["t"])
+                record["vspeed_mps"] = (float(record["Alt"]) - float(previous["Alt"])) / dt if dt > 0 else 0.0
+            else:
+                record["vspeed_mps"] = 0.0
 
-    # Vertical speed from VD (EKF down-velocity, negated for "up positive")
-    if "VD" in merged.columns:
-        merged["vspeed_mps"] = -merged["VD"]
-    else:
-        merged["vspeed_mps"] = merged["Alt"].diff() / merged["t"].diff()
-        merged["vspeed_mps"] = merged["vspeed_mps"].fillna(0.0)
-
-    # Horizontal acceleration proxy (d/dt of horizontal speed, m/s²)
-    horiz_spd = np.sqrt(
-        np.square(merged.get("VN", pd.Series(np.zeros(len(merged))))).values +
-        np.square(merged.get("VE", pd.Series(np.zeros(len(merged))))).values
-    )
-    dt = np.diff(merged["t"].values, prepend=merged["t"].values[0])
-    dt[dt == 0] = np.nan
-    merged["accel_mps2"] = np.gradient(horiz_spd, merged["t"].values)
-    merged["accel_mps2"] = merged["accel_mps2"].fillna(0.0)
+        if previous is not None:
+            dt = float(record["t"]) - float(previous["t"])
+            dv = float(record["horiz_speed_mps"]) - float(previous["horiz_speed_mps"])
+            record["accel_mps2"] = dv / dt if dt > 0 else 0.0
+        else:
+            record["accel_mps2"] = 0.0
+        previous = record
 
     return merged
 
 
-def add_relative_time(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["t_rel"] = df["t"] - df["t"].iloc[0]
-    return df
+def add_relative_time(records: list[Record]) -> list[Record]:
+    t0 = float(records[0]["t"])
+    out = []
+    for record in records:
+        next_record = record.copy()
+        next_record["t_rel"] = float(record["t"]) - t0
+        out.append(next_record)
+    return out
 
 
-def filter_by_time_window(df, start_s, end_s):
-    out = df
+def filter_by_time_window(records: list[Record], start_s: float | None, end_s: float | None) -> list[Record]:
+    out = records
     if start_s is not None:
-        out = out[out["t_rel"] >= float(start_s)]
+        out = [record for record in out if float(record["t_rel"]) >= float(start_s)]
     if end_s is not None:
-        out = out[out["t_rel"] <= float(end_s)]
-    return out.reset_index(drop=True)
+        out = [record for record in out if float(record["t_rel"]) <= float(end_s)]
+    return out
 
 
-def downsample(df: pd.DataFrame, step: int) -> pd.DataFrame:
-    return df.iloc[::max(1, step)].reset_index(drop=True)
+def downsample(records: list[Record], step: int) -> list[Record]:
+    return records[::max(1, step)]
 
 
 # =============================================================================
@@ -616,22 +660,28 @@ resize();
 """
 
 
-def build_2d_chart(df: pd.DataFrame, html_out: Path, title: str) -> None:
+def _round_or_none(value: Any, digits: int) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+def build_2d_chart(records: list[Record], html_out: Path, title: str) -> None:
     # Align altitude to relative (subtract first value for local frame)
-    alt0 = float(df["Alt"].iloc[0])
+    alt0 = float(records[0]["Alt"])
 
     telem = {
-        "t":         df["t_rel"].round(3).tolist(),
-        "speed_mps": df["speed_mps"].round(3).tolist(),
-        "z_alt":     (df["Alt"] - alt0).round(2).tolist(),
-        "vspeed":    df["vspeed_mps"].round(3).tolist(),
-        "accel":     df["accel_mps2"].round(3).tolist(),
-        "throttle":  df["throttle_pct"].round(1).tolist(),
-        "roll":      df["Roll"].round(2).tolist(),
-        "pitch":     df["Pitch"].round(2).tolist(),
-        "yaw":       df["Yaw"].round(2).tolist(),
-        "lat":       df["Lat"].round(6).tolist(),
-        "lng":       df["Lng"].round(6).tolist(),
+        "t":         [_round_or_none(record["t_rel"], 3) for record in records],
+        "speed_mps": [_round_or_none(record["speed_mps"], 3) for record in records],
+        "z_alt":     [_round_or_none(float(record["Alt"]) - alt0, 2) for record in records],
+        "vspeed":    [_round_or_none(record["vspeed_mps"], 3) for record in records],
+        "accel":     [_round_or_none(record["accel_mps2"], 3) for record in records],
+        "throttle":  [_round_or_none(record["throttle_pct"], 1) for record in records],
+        "roll":      [_round_or_none(record["Roll"], 2) for record in records],
+        "pitch":     [_round_or_none(record["Pitch"], 2) for record in records],
+        "yaw":       [_round_or_none(record["Yaw"], 2) for record in records],
+        "lat":       [_round_or_none(record["Lat"], 6) for record in records],
+        "lng":       [_round_or_none(record["Lng"], 6) for record in records],
     }
 
     html = HTML_TEMPLATE.format(
@@ -657,7 +707,7 @@ def main() -> None:
             raise ValueError("START_TIME_SECONDS must be <= END_TIME_SECONDS")
 
     filtered = filter_by_time_window(data, START_TIME_SECONDS, END_TIME_SECONDS)
-    if filtered.empty:
+    if not filtered:
         raise RuntimeError("No samples in selected time range. Adjust START_TIME_SECONDS / END_TIME_SECONDS.")
 
     ds = downsample(filtered, DOWNSAMPLE_STEP)

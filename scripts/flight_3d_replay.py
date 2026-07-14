@@ -8,40 +8,65 @@ DataFlash log (.BIN) and generates an animated 3D HTML replay.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from pathlib import Path
-from typing import Dict, List
+from statistics import median
+from typing import Any
 
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 from pymavlink import mavutil
 
 # =============================================================================
 # USER CONSTANTS
 # =============================================================================
-LOG_FILE_PATH = "00000007.BIN"
+LOG_FILE_PATH = "00000001.BIN"
 OUTPUT_HTML_PATH = "flight_3d_replay.html"
-ANIMATION_DOWNSAMPLE_STEP = 8
+ANIMATION_DOWNSAMPLE_STEP = 5
 
 # Optional time window in seconds from log start.
 # Set to None to disable the boundary.
-START_TIME_SECONDS = 1265       # set None for the full file parse
-END_TIME_SECONDS = 1485         # set None for the full time parse
+START_TIME_SECONDS = 448  # set None for the full file parse
+END_TIME_SECONDS = 1530  # set None for the full time parse
 
 
-def _msg_to_record(msg, fields: List[str]) -> Dict[str, float]:
-    rec = {}
+Record = dict[str, Any]
+
+
+def _msg_to_record(msg, fields: list[str]) -> Record:
+    rec: Record = {}
     for field in fields:
         if hasattr(msg, field):
             rec[field] = getattr(msg, field)
     return rec
 
 
-def extract_flight_data(log_path: Path) -> pd.DataFrame:
+def _nearest_record(records: list[Record], t: float, tolerance_s: float) -> Record | None:
+    if not records:
+        return None
+
+    times = [float(record["t"]) for record in records]
+    index = bisect_left(times, t)
+    best: tuple[float, Record] | None = None
+
+    for candidate_index in (index - 1, index):
+        if 0 <= candidate_index < len(records):
+            record = records[candidate_index]
+            delta = abs(float(record["t"]) - t)
+            if delta <= tolerance_s and (best is None or delta < best[0]):
+                best = (delta, record)
+
+    return best[1] if best else None
+
+
+def _has_value(record: Record | None, field: str) -> bool:
+    return record is not None and field in record and record[field] is not None
+
+
+def extract_flight_data(log_path: Path) -> list[Record]:
     """Extract and align POS, ATT, GPS, and XKF1 data into one timeline."""
     mavlog = mavutil.mavlink_connection(str(log_path))
 
-    pos_records, att_records, gps_records, xkf1_records = [], [], [], []
+    pos_records, att_records, gps_records, xkf1_records, arsp_records = [], [], [], [], []
 
     while True:
         msg = mavlog.recv_match()
@@ -70,92 +95,135 @@ def extract_flight_data(log_path: Path) -> pd.DataFrame:
             record = _msg_to_record(msg, ["VN", "VE", "VD"])
             record["t"] = t
             xkf1_records.append(record)
+        elif msg_type == "ARSP":
+            record = _msg_to_record(msg, ["Airspeed", "H"])
+            record["t"] = t
+            arsp_records.append(record)
 
     if not pos_records or not att_records:
         raise RuntimeError("Required POS/ATT data not found in log.")
 
-    pos_df = pd.DataFrame(pos_records).sort_values("t")
-    att_df = pd.DataFrame(att_records).sort_values("t")
-    gps_df = pd.DataFrame(gps_records).sort_values("t") if gps_records else pd.DataFrame(columns=["t"])
-    xkf1_df = pd.DataFrame(xkf1_records).sort_values("t") if xkf1_records else pd.DataFrame(columns=["t"])
+    pos_records.sort(key=lambda record: record["t"])
+    att_records.sort(key=lambda record: record["t"])
+    gps_records.sort(key=lambda record: record["t"])
+    xkf1_records.sort(key=lambda record: record["t"])
+    arsp_records.sort(key=lambda record: record["t"])
 
-    # POS is our base timeline because it has continuous global coordinates.
-    base = pos_df[["t", "Lat", "Lng", "Alt", "RelHomeAlt"]].copy()
+    merged: list[Record] = []
+    for pos in pos_records:
+        t = float(pos["t"])
+        att = _nearest_record(att_records, t, 0.2)
+        if att is None:
+            continue
 
-    # Attach nearest attitude/speed samples by time.
-    merged = pd.merge_asof(base.sort_values("t"), att_df, on="t", direction="nearest", tolerance=0.2)
-    if not gps_df.empty:
-        merged = pd.merge_asof(merged.sort_values("t"), gps_df[["t", "Spd"]], on="t", direction="nearest", tolerance=0.5)
-    if not xkf1_df.empty:
-        merged = pd.merge_asof(
-            merged.sort_values("t"),
-            xkf1_df[["t", "VN", "VE", "VD"]],
-            on="t",
-            direction="nearest",
-            tolerance=0.5,
+        gps = _nearest_record(gps_records, t, 0.5)
+        xkf1 = _nearest_record(xkf1_records, t, 0.5)
+        arsp = _nearest_record(arsp_records, t, 0.5)
+
+        ground_speed_mps = 0.0
+        if _has_value(gps, "Spd"):
+            ground_speed_mps = float(gps["Spd"])
+        elif _has_value(xkf1, "VN") and _has_value(xkf1, "VE"):
+            ground_speed_mps = math.hypot(float(xkf1["VN"]), float(xkf1["VE"]))
+
+        healthy_airspeed_mps = None
+        if _has_value(arsp, "Airspeed") and _has_value(arsp, "H") and int(arsp["H"]) == 1:
+            healthy_airspeed_mps = float(arsp["Airspeed"])
+
+        merged.append(
+            {
+                "t": t,
+                "Lat": float(pos["Lat"]),
+                "Lng": float(pos["Lng"]),
+                "Alt": float(pos["Alt"]),
+                "RelHomeAlt": float(pos.get("RelHomeAlt", 0.0)),
+                "Roll": float(att["Roll"]),
+                "Pitch": float(att["Pitch"]),
+                "Yaw": float(att["Yaw"]),
+                "ground_speed_mps": ground_speed_mps,
+                "healthy_airspeed_mps": healthy_airspeed_mps,
+                "speed_mps": healthy_airspeed_mps if healthy_airspeed_mps is not None else ground_speed_mps,
+            }
         )
-
-    merged = merged.dropna(subset=["Roll", "Pitch", "Yaw"]).reset_index(drop=True)
-
-    # Derive speed from XKF1 if GPS speed missing.
-    if "Spd" not in merged.columns:
-        merged["Spd"] = np.nan
-    if {"VN", "VE"}.issubset(merged.columns):
-        ekf_speed = np.sqrt(np.square(merged["VN"]) + np.square(merged["VE"]))
-        merged["speed_mps"] = merged["Spd"].fillna(ekf_speed)
-    else:
-        merged["speed_mps"] = merged["Spd"]
-    merged["speed_mps"] = merged["speed_mps"].fillna(0.0)
 
     return merged
 
 
-def lla_to_local_ned(df: pd.DataFrame) -> pd.DataFrame:
+def lla_to_local_ned(records: list[Record]) -> list[Record]:
     """Convert lat/lng/alt to local metric frame around first position."""
-    lat0 = float(df["Lat"].iloc[0])
-    lng0 = float(df["Lng"].iloc[0])
-    alt0 = float(df["Alt"].iloc[0])
+    lat0 = float(records[0]["Lat"])
+    lng0 = float(records[0]["Lng"])
+    alt0 = float(records[0]["Alt"])
+    t0 = float(records[0]["t"])
 
     meters_per_deg_lat = 111_320.0
     meters_per_deg_lng = 111_320.0 * math.cos(math.radians(lat0))
 
-    out = df.copy()
-    out["x_east_m"] = (out["Lng"] - lng0) * meters_per_deg_lng
-    out["y_north_m"] = (out["Lat"] - lat0) * meters_per_deg_lat
-    out["z_up_m"] = out["Alt"] - alt0
-    out["t_rel"] = out["t"] - out["t"].iloc[0]
+    out = []
+    for record in records:
+        next_record = record.copy()
+        next_record["x_east_m"] = (float(record["Lng"]) - lng0) * meters_per_deg_lng
+        next_record["y_north_m"] = (float(record["Lat"]) - lat0) * meters_per_deg_lat
+        next_record["z_up_m"] = float(record["Alt"]) - alt0
+        next_record["t_rel"] = float(record["t"]) - t0
+        out.append(next_record)
     return out
 
 
-def downsample_for_animation(df: pd.DataFrame, step: int) -> pd.DataFrame:
+def downsample_for_animation(records: list[Record], step: int) -> list[Record]:
     if step <= 1:
-        return df
-    return df.iloc[::step].reset_index(drop=True)
+        return records
+    return records[::step]
+
+
+def add_kinematics(records: list[Record]) -> list[Record]:
+    """Add per-sample timing and acceleration derived from speed."""
+    out: list[Record] = []
+    previous: Record | None = None
+    for record in records:
+        next_record = record.copy()
+        if previous is None:
+            next_record["dt_s"] = 0.0
+            next_record["accel_mps2"] = 0.0
+        else:
+            dt = float(record["t_rel"]) - float(previous["t_rel"])
+            dv = float(record["speed_mps"]) - float(previous["speed_mps"])
+            next_record["dt_s"] = max(0.0, dt)
+            next_record["accel_mps2"] = dv / dt if dt > 0 else 0.0
+        out.append(next_record)
+        previous = record
+    return out
 
 
 def filter_by_time_window(
-    df: pd.DataFrame,
+    records: list[Record],
     start_time_s: float | None,
     end_time_s: float | None,
-) -> pd.DataFrame:
+) -> list[Record]:
     """Filter rows using optional relative time bounds (seconds from log start)."""
-    out = df
+    out = records
     if start_time_s is not None:
-        out = out[out["t_rel"] >= float(start_time_s)]
+        out = [record for record in out if float(record["t_rel"]) >= float(start_time_s)]
     if end_time_s is not None:
-        out = out[out["t_rel"] <= float(end_time_s)]
-    return out.reset_index(drop=True)
+        out = [record for record in out if float(record["t_rel"]) <= float(end_time_s)]
+    return out
 
 
-def build_3d_replay(df: pd.DataFrame, html_out: Path, title: str) -> None:
-    x = df["x_east_m"].to_numpy()
-    y = df["y_north_m"].to_numpy()
-    z = df["z_up_m"].to_numpy()
-    t = df["t_rel"].to_numpy()
-    spd = df["speed_mps"].to_numpy()
-    roll = df["Roll"].to_numpy()
-    pitch = df["Pitch"].to_numpy()
-    yaw = df["Yaw"].to_numpy()
+def build_3d_replay(records: list[Record], html_out: Path, title: str) -> None:
+    x = [float(record["x_east_m"]) for record in records]
+    y = [float(record["y_north_m"]) for record in records]
+    z = [float(record["z_up_m"]) for record in records]
+    t = [float(record["t_rel"]) for record in records]
+    spd = [float(record["speed_mps"]) for record in records]
+    gspd = [float(record["ground_speed_mps"]) for record in records]
+    aspd = [record["healthy_airspeed_mps"] for record in records]
+    accel = [float(record["accel_mps2"]) for record in records]
+    roll = [float(record["Roll"]) for record in records]
+    pitch = [float(record["Pitch"]) for record in records]
+    yaw = [float(record["Yaw"]) for record in records]
+    dt = [float(record["dt_s"]) for record in records]
+    positive_dt = [value for value in dt if value > 0]
+    frame_duration_ms = max(20, int(median(positive_dt) * 1000)) if positive_dt else 50
 
     path_trace = go.Scatter3d(
         x=x,
@@ -178,14 +246,19 @@ def build_3d_replay(df: pd.DataFrame, html_out: Path, title: str) -> None:
     )
 
     frames = []
-    for i in range(len(df)):
+    for i in range(len(records)):
+        airspeed_text = f"{aspd[i]:.3f} m/s" if aspd[i] is not None else "n/a"
         info = (
-            f"t={t[i]:.1f}s<br>"
-            f"speed={spd[i]:.1f} m/s ({spd[i]*3.6:.1f} km/h)<br>"
-            f"alt={z[i]:.1f} m rel<br>"
-            f"roll={roll[i]:.1f} deg<br>"
-            f"pitch={pitch[i]:.1f} deg<br>"
-            f"yaw={yaw[i]:.1f} deg"
+            f"t={t[i]:.3f}s<br>"
+            f"dt={dt[i]:.3f}s<br>"
+            f"display speed={spd[i]:.3f} m/s ({spd[i]*3.6:.3f} km/h)<br>"
+            f"ground speed={gspd[i]:.3f} m/s<br>"
+            f"healthy airspeed={airspeed_text}<br>"
+            f"accel={accel[i]:.3f} m/s^2<br>"
+            f"alt={z[i]:.3f} m rel<br>"
+            f"roll={roll[i]:.3f} deg<br>"
+            f"pitch={pitch[i]:.3f} deg<br>"
+            f"yaw={yaw[i]:.3f} deg"
         )
         frames.append(
             go.Frame(
@@ -195,7 +268,11 @@ def build_3d_replay(df: pd.DataFrame, html_out: Path, title: str) -> None:
                         y=y[: i + 1],
                         z=z[: i + 1],
                         mode="lines",
-                        line=dict(width=5, color=np.linspace(0, 1, i + 1), colorscale="Viridis"),
+                        line=dict(
+                            width=5,
+                            color=[j / max(1, i) for j in range(i + 1)],
+                            colorscale="Viridis",
+                        ),
                         name="Trail",
                     ),
                     go.Scatter3d(
@@ -233,7 +310,7 @@ def build_3d_replay(df: pd.DataFrame, html_out: Path, title: str) -> None:
                     dict(
                         label="Play",
                         method="animate",
-                        args=[None, {"frame": {"duration": 50, "redraw": True}, "fromcurrent": True}],
+                        args=[None, {"frame": {"duration": frame_duration_ms, "redraw": True}, "fromcurrent": True}],
                     ),
                     dict(
                         label="Pause",
@@ -247,7 +324,11 @@ def build_3d_replay(df: pd.DataFrame, html_out: Path, title: str) -> None:
             dict(
                 currentvalue={"prefix": "Frame: "},
                 steps=[
-                    dict(method="animate", args=[[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}], label=str(i))
+                    dict(
+                        method="animate",
+                        args=[[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
+                        label=f"{t[i]:.2f}s",
+                    )
                     for i in range(len(frames))
                 ],
             )
@@ -274,10 +355,11 @@ def main() -> None:
             raise ValueError("START_TIME_SECONDS must be <= END_TIME_SECONDS")
 
     filtered = filter_by_time_window(local, START_TIME_SECONDS, END_TIME_SECONDS)
-    if filtered.empty:
+    if not filtered:
         raise RuntimeError("No samples in selected time range. Adjust START_TIME_SECONDS/END_TIME_SECONDS.")
 
-    local_ds = downsample_for_animation(filtered, max(1, int(ANIMATION_DOWNSAMPLE_STEP)))
+    local_kin = add_kinematics(filtered)
+    local_ds = downsample_for_animation(local_kin, max(1, int(ANIMATION_DOWNSAMPLE_STEP)))
 
     print(f"Samples total: {len(local)} | selected: {len(filtered)} | animated frames: {len(local_ds)}")
     build_3d_replay(local_ds, out_path, title=f"3D Flight Replay: {log_path.name}")
