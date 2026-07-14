@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Flight Log Checker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <header class="shell-header">
+        <div>
+            <h1>Flight Log Checker</h1>
+            <p id="activeLog">No log selected</p>
+        </div>
+        <div class="status-cluster">
+            <span id="statusPill" class="pill idle">Idle</span>
+            <button id="refreshBtn" class="ghost" type="button">Refresh</button>
+        </div>
+    </header>
+
+    <nav class="tabs" aria-label="Flight log checker tabs">
+        <button class="tab active" data-tab="setup" type="button">Main</button>
+        <button class="tab" data-tab="params" type="button">2D Parameters</button>
+        <button class="tab" data-tab="view2d" type="button">2D Log</button>
+        <button class="tab" data-tab="view3d" type="button">3D Log</button>
+    </nav>
+
+    <main>
+        <section id="setup" class="tab-panel active">
+            <div class="grid">
+                <section class="panel">
+                    <div class="panel-title">
+                        <h2>Log Source</h2>
+                        <span>.BIN DataFlash</span>
+                    </div>
+                    <form id="selectForm" class="stack">
+                        <label class="field">
+                            <span>Available Logs</span>
+                            <select id="logSelect" name="log_path"></select>
+                        </label>
+                        <label class="field">
+                            <span>Custom Path</span>
+                            <input id="pathInput" name="custom_path" type="text" placeholder="/Users/.../logs/00000007.BIN">
+                        </label>
+                        <label class="field">
+                            <span>Upload Log</span>
+                            <input id="fileInput" name="log_file" type="file" accept=".BIN,.bin">
+                        </label>
+                        <div class="actions">
+                            <button id="selectBtn" type="submit">Set Log And Detect</button>
+                            <button id="detectBtn" class="ghost" type="button">Detect Window</button>
+                        </div>
+                    </form>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-title">
+                        <h2>Detected Flight Window</h2>
+                        <span id="windowState">Waiting</span>
+                    </div>
+                    <div class="metrics">
+                        <div><span>Start</span><strong id="startTime">--</strong></div>
+                        <div><span>End</span><strong id="endTime">--</strong></div>
+                        <div><span>Launch</span><strong id="launchTime">--</strong></div>
+                        <div><span>Landing</span><strong id="landingTime">--</strong></div>
+                        <div class="metric-wide"><span>Duration</span><strong id="duration">--</strong></div>
+                    </div>
+                    <div class="actions split">
+                        <button id="generate2dBtn" type="button">Create 2D Flight Log</button>
+                        <button id="generate3dBtn" type="button">Create 3D Flight Log</button>
+                    </div>
+                </section>
+            </div>
+            <section class="console" id="messageBox"></section>
+        </section>
+
+        <section id="params" class="tab-panel">
+            <section class="panel">
+                <div class="panel-title">
+                    <h2>2D Chart Parameters</h2>
+                    <span id="paramCount">0 selected</span>
+                </div>
+                <div class="toolbar">
+                    <button id="selectDefaultsBtn" class="ghost" type="button">Defaults</button>
+                    <button id="selectAllBtn" class="ghost" type="button">All</button>
+                    <button id="clearParamsBtn" class="ghost" type="button">Clear</button>
+                </div>
+                <div id="metricList" class="metric-list"></div>
+            </section>
+        </section>
+
+        <section id="view2d" class="tab-panel">
+            <section class="viewer-panel">
+                <div class="viewer-empty" id="empty2d">No 2D log generated</div>
+                <iframe id="frame2d" title="Generated 2D flight log"></iframe>
+            </section>
+        </section>
+
+        <section id="view3d" class="tab-panel">
+            <section class="viewer-panel">
+                <div class="viewer-empty" id="empty3d">No 3D log generated</div>
+                <iframe id="frame3d" title="Generated 3D flight log"></iframe>
+            </section>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
