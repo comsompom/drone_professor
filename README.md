@@ -25,6 +25,13 @@ drone_professor/
 │   ├── hardware_scraper.py    # Scrapes hardware & UART pinouts
 │   └── drone_assistant.py     # The main Local LLM RAG application
 │
+├── gps_checker/               # Flask GPS receiver checker/dashboard
+│   ├── app.py                 # Flask server and API routes
+│   ├── gps_reader.py          # Serial auto-detection and GPS protocol parsing
+│   ├── requirements.txt       # GPS checker dependencies
+│   ├── templates/             # Dashboard HTML
+│   └── static/                # Dashboard CSS and JavaScript
+│
 └── README.md                  # This file
 ```
 
@@ -139,6 +146,63 @@ Once the `You:` prompt appears, try asking:
 
 ---
 
+## 📡 GPS Checker: u-blox / Here RTK M8P Dashboard
+
+The repository now includes a separate Flask application in `gps_checker/` for checking a connected GPS/GNSS receiver from a browser. It is intended to provide a lightweight alternative to desktop tools such as u-blox u-center when you want to see live receiver status from Python.
+
+The GPS Checker can:
+* Auto-detect connected serial GPS receivers.
+* Read common NMEA sentences.
+* Read useful u-blox UBX messages such as `NAV-PVT`, `NAV-SAT`, `MON-VER`, and `RXM-RTCM`.
+* Show fix type, RTK fixed/float status, position, altitude, horizontal/vertical accuracy, satellite count, sky view, C/N0 signal bars, and satellite details.
+
+### Run the GPS Checker
+
+**1. Install the GPS Checker dependencies:**
+```bash
+pip install -r gps_checker/requirements.txt
+```
+
+**2. Start the Flask app:**
+```bash
+python gps_checker/app.py
+```
+
+**3. Open the dashboard:**
+```text
+http://127.0.0.1:5050
+```
+
+If port `5050` is already in use, run it on another port:
+```bash
+GPS_CHECKER_PORT=5051 python gps_checker/app.py
+```
+
+Then open:
+```text
+http://127.0.0.1:5051
+```
+
+### Force a Known GPS Port
+
+Auto-detection scans serial ports and common GPS baud rates. If you already know the receiver port, you can force it.
+
+On macOS/Linux:
+```bash
+GPS_PORT=/dev/tty.usbmodem1101 GPS_BAUD=115200 python gps_checker/app.py
+```
+
+On Windows:
+```powershell
+$env:GPS_PORT="COM7"; $env:GPS_BAUD="115200"; python gps_checker/app.py
+```
+
+### GPS Output Notes
+
+For the richest dashboard data, configure the receiver to output UBX `NAV-PVT` and `NAV-SAT`. If the receiver outputs only NMEA, the app can still display position and satellite data when `GGA`, `RMC`, `GSA`, and `GSV` sentences are enabled.
+
+---
+
 ## 🛠 Maintenance & Updates
 
 When a new version of ArduPilot is released (e.g., v4.7):
@@ -150,3 +214,7 @@ When a new version of ArduPilot is released (e.g., v4.7):
    ```
 4. Run `python scripts/drone_assistant.py` again!
 
+For GPS Checker changes:
+1. Keep its code isolated inside `gps_checker/`.
+2. Add new GPS-specific dependencies to `gps_checker/requirements.txt`.
+3. Do not commit generated `__pycache__/` files.
